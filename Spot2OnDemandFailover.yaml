@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Metadata: 
+  License: Apache-2.0
+Description: 'Failover spot to on demand.'
+
+Parameters:
+  VPCName:
+    Type: String
+    Default: 'vpc-xxxxxx'
+    
+Resources:
+  SpotSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: 'SpotSG'
+      GroupDescription: 'Security group for spot instances.'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref 'VPCName'
+      
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: 'ipv4'
+      Name: 'ALB'
+      Scheme: 'internet-facing'
+      Type: "application"
+
+  SpotLC:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      LaunchConfigurationName: 'SpotLC'
+      ImageId: ami-07683a44e80cd32c5
+      SpotPrice: "0.0040"
+      SecurityGroups:
+        - !Ref SpotSG
+      InstanceType: t2.micro
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sdc"
+          VirtualName: ephemeral0
+        
+  SpotASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: 'SpotASG'
+      AvailabilityZones:
+        - 'eu-west-1a'
+      Cooldown: "120"
+      MetricsCollection:
+        - Granularity: '1Minute'
+          Metrics:
+            - GroupInServiceInstances
+      DesiredCapacity: "3"
+      HealthCheckGracePeriod: 30
+      HealthCheckType: "EC2"
+      LaunchConfigurationName: 'SpotLC'
+      MaxSize: "5"
+      MinSize: "2"
+    DependsOn: 
+      - SpotLC
+      - ALB
+      
+  OnDemandSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: 'OnDemandSG'
+      GroupDescription: 'SG for on demand failover instances.'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref 'VPCName'
+
+  OnDemandLC:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      LaunchConfigurationName: 'OnDemandLC'
+      ImageId: ami-07683a44e80cd32c5
+      SecurityGroups:
+      - !Ref OnDemandrSG
+      InstanceType: t2.micro
+      BlockDeviceMappings:
+      - DeviceName: "/dev/sdc"
+        VirtualName: ephemeral0
+
+  OnDemandASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: 'OnDemandASG'
+      AvailabilityZones:
+        - 'eu-west-1a'
+      Cooldown: "120"
+      MetricsCollection:
+        - Granularity: '1Minute'
+          Metrics:
+            - GroupInServiceInstances
+      DesiredCapacity: "0"
+      HealthCheckGracePeriod: 30
+      HealthCheckType: "EC2"
+      LaunchConfigurationName: 'OnDemandLC'
+      MaxSize: "3"
+      MinSize: "0"
+    DependsOn: 
+      - OnDemandLC
+      - ALB
+      
+      
+  ScaleUpOnDemandAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: '1'
+      Statistic: SampleCount
+      Threshold: '2'
+      AlarmDescription: Alarm if less than 2 spot instances
+      AlarmActions:
+      - Ref: ScaleUpPolicy
+      Namespace: AWS/AutoScaling
+      Period: '60'
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: 'SpotASG'
+      ComparisonOperator: LessThanThreshold
+      MetricName: 'GroupInServiceInstances'
+
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref OnDemandASG
+      AdjustmentType: 'ChangeInCapacity'
+      Cooldown: '30'
+      PolicyType: 'SimpleScaling'
+      ScalingAdjustment: 1
+      
+  ScaleDownOnDemandAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: '1'
+      Statistic: SampleCount
+      Threshold: '2'
+      AlarmDescription:  Alarm if # spot instances more than 2
+      AlarmActions:
+      - Ref: ScaleDownPolicy
+      Namespace: AWS/AutoScaling
+      Period: '60'
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: 'SpotASG'
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: 'GroupInServiceInstances'
+
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref OnDemandASG
+      AdjustmentType: 'ChangeInCapacity'
+      Cooldown: '30'
+      PolicyType: 'SimpleScaling'
+      ScalingAdjustment: -1
